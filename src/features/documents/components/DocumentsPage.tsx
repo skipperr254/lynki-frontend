@@ -1,0 +1,123 @@
+import { useState, useEffect, useCallback } from "react";
+import { HardDrive } from "lucide-react";
+import { Header } from "@/components/layout/Header";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useAuth } from "@/features/auth";
+import {
+  fetchUserDocuments,
+  getUserStorageStats,
+  deleteDocument,
+} from "../services/documentService";
+import { FileUploader } from "./FileUploader";
+import { DocumentsList } from "./DocumentsList";
+import type { Document, StorageStats } from "../types";
+
+export function DocumentsPage() {
+  const { user } = useAuth();
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [stats, setStats] = useState<StorageStats>({
+    usedSpace: 0,
+    fileCount: 0,
+  });
+  const [loading, setLoading] = useState(true);
+
+  const loadData = useCallback(async () => {
+    if (!user) return;
+    try {
+      const [docs, storageStats] = await Promise.all([
+        fetchUserDocuments(user.id),
+        getUserStorageStats(user.id),
+      ]);
+      setDocuments(docs);
+      setStats(storageStats);
+    } catch (error) {
+      console.error("Failed to load documents data:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleDelete = async (id: string, filePath: string) => {
+    if (!confirm("Are you sure you want to delete this file?")) return;
+
+    try {
+      // Optimistic update
+      setDocuments((prev) => prev.filter((d) => d.id !== id));
+      await deleteDocument(id, filePath);
+      loadData(); // Reload to sync stats
+    } catch (error) {
+      console.error("Delete failed:", error);
+      loadData(); // Revert if failed
+    }
+  };
+
+  const handleUploadComplete = () => {
+    loadData();
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes === 0) return "0 B";
+    const k = 1024;
+    const sizes = ["B", "KB", "MB", "GB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  };
+
+  if (!user) return null;
+
+  return (
+    <>
+      <Header />
+      <div className="min-h-screen bg-background p-6 md:p-12 pt-28">
+        <div className="max-w-6xl mx-auto space-y-8">
+          <div className="flex flex-col md:flex-row gap-6">
+            {/* Stats Card */}
+            <div className="w-full md:w-1/3">
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">
+                    Storage Used
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-center gap-4">
+                    <div className="p-3 bg-primary/10 rounded-full">
+                      <HardDrive className="h-6 w-6 text-primary" />
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold">
+                        {formatFileSize(stats.usedSpace)}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {stats.fileCount} files uploaded
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Upload Section */}
+            <div className="w-full md:w-2/3">
+              <FileUploader
+                userId={user.id}
+                onUploadComplete={handleUploadComplete}
+              />
+            </div>
+          </div>
+
+          {/* Documents List */}
+          <DocumentsList
+            documents={documents}
+            onDelete={handleDelete}
+            loading={loading}
+          />
+        </div>
+      </div>
+    </>
+  );
+}

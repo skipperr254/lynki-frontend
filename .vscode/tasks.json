@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "check_type_import",
+			"type": "shell",
+			"command": "type QuizAnswer = { questionId: string; selectedOption: number; };",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "none"
+		}
+	]
+}
