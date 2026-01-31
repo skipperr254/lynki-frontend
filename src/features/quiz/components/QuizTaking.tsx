@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/features/auth";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,46 +10,58 @@ import {
   CheckCircle2,
   Loader2,
   X,
+  AlertCircle,
 } from "lucide-react";
 import { fetchQuiz, submitQuizAttempt } from "../services/quizService";
-import type { Quiz, QuizAnswer } from "@/types/quiz";
+import type { QuizAnswer } from "@/types/quiz";
+
+// Query keys for React Query
+export const quizQueryKeys = {
+  all: ["quizzes"] as const,
+  detail: (quizId: string) => [...quizQueryKeys.all, "detail", quizId] as const,
+};
 
 export function QuizTaking() {
   const { quizId } = useParams<{ quizId: string }>();
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const [quiz, setQuiz] = useState<Quiz | null>(null);
-  const [loading, setLoading] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answers, setAnswers] = useState<Map<string, number>>(new Map());
   const [showHint, setShowHint] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  useEffect(() => {
-    async function loadQuiz() {
-      if (!quizId) return;
+  // Fetch quiz with React Query (cached, no refetch on focus)
+  const {
+    data: quiz,
+    isLoading,
+    error,
+  } = useQuery({
+    queryKey: quizQueryKeys.detail(quizId ?? ""),
+    queryFn: () => fetchQuiz(quizId!),
+    enabled: !!quizId,
+  });
 
-      try {
-        setLoading(true);
-        const data = await fetchQuiz(quizId);
-        setQuiz(data);
-      } catch (err) {
-        console.error("Failed to load quiz:", err);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    loadQuiz();
-  }, [quizId]);
-
-  if (loading || !quiz) {
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-linear-to-br from-background to-muted/20">
         <div className="text-center space-y-4">
           <Loader2 className="w-12 h-12 animate-spin mx-auto text-primary" />
           <p className="text-muted-foreground">Loading quiz...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !quiz) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-linear-to-br from-background to-muted/20">
+        <div className="text-center space-y-4">
+          <AlertCircle className="w-12 h-12 mx-auto text-destructive" />
+          <p className="text-muted-foreground">Failed to load quiz</p>
+          <Button variant="outline" onClick={() => navigate("/quizzes")}>
+            Back to Quizzes
+          </Button>
         </div>
       </div>
     );

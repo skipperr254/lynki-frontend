@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { HardDrive } from "lucide-react";
 import { Header } from "@/components/layout/Header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,60 +13,76 @@ import {
 } from "../services/documentService";
 import { FileUploader } from "./FileUploader";
 import { DocumentsList } from "./DocumentsList";
-import type { Document, StorageStats } from "../types";
+import type { Document } from "../types";
 import { toast } from "sonner";
+
+// Query keys for React Query
+export const documentQueryKeys = {
+  all: ["documents"] as const,
+  list: (userId: string) => [...documentQueryKeys.all, "list", userId] as const,
+  stats: (userId: string) => [...documentQueryKeys.all, "stats", userId] as const,
+};
 
 export function DocumentsPage() {
   const { user } = useAuth();
-  const [documents, setDocuments] = useState<Document[]>([]);
-  const [stats, setStats] = useState<StorageStats>({
-    usedSpace: 0,
-    fileCount: 0,
-  });
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const hasWokenBackend = useRef(false);
 
-  const loadData = useCallback(async () => {
-    if (!user) return;
-    try {
-      const [docs, storageStats] = await Promise.all([
-        fetchUserDocuments(user.id),
-        getUserStorageStats(user.id),
-      ]);
-      setDocuments(docs);
-      setStats(storageStats);
-    } catch (error) {
-      console.error("Failed to load documents data:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, [user]);
-
+  // Wake up Render backend once on mount
   useEffect(() => {
-    loadData();
-    // Wake up Render backend on page load to handle cold starts
-    wakeUpBackend().then((isAwake) => {
-      if (!isAwake) {
-        console.log("Backend may be cold starting, first upload may take longer");
-      }
-    });
-  }, [loadData]);
+    if (!hasWokenBackend.current) {
+      hasWokenBackend.current = true;
+      wakeUpBackend().then((isAwake) => {
+        if (!isAwake) {
+          console.log("Backend may be cold starting, first upload may take longer");
+        }
+      });
+    }
+  }, []);
+
+  // Fetch documents with React Query
+  const {
+    data: documents = [],
+    isLoading: documentsLoading,
+  } = useQuery({
+    queryKey: documentQueryKeys.list(user?.id ?? ""),
+    queryFn: () => fetchUserDocuments(user!.id),
+    enabled: !!user,
+  });
+
+  // Fetch storage stats with React Query
+  const { data: stats = { usedSpace: 0, fileCount: 0 } } = useQuery({
+    queryKey: documentQueryKeys.stats(user?.id ?? ""),
+    queryFn: () => getUserStorageStats(user!.id),
+    enabled: !!user,
+  });
 
   const handleDelete = async (id: string, filePath: string) => {
     if (!confirm("Are you sure you want to delete this file?")) return;
 
+    // Optimistic update
+    queryClient.setQueryData(
+      documentQueryKeys.list(user!.id),
+      (old: Document[] | undefined) => old?.filter((d) => d.id !== id) ?? []
+    );
+
     try {
-      // Optimistic update
-      setDocuments((prev) => prev.filter((d) => d.id !== id));
       await deleteDocument(id, filePath);
-      loadData(); // Reload to sync stats
+      // Invalidate to refetch fresh data
+      queryClient.invalidateQueries({ queryKey: documentQueryKeys.all });
     } catch (error) {
       console.error("Delete failed:", error);
-      loadData(); // Revert if failed
+      // Revert on error
+      queryClient.invalidateQueries({ queryKey: documentQueryKeys.all });
+      toast.error("Delete failed", {
+        description: "Could not delete the document. Please try again.",
+      });
     }
   };
 
   const handleUploadComplete = () => {
-    loadData();
+    // Invalidate queries to refetch
+    queryClient.invalidateQueries({ queryKey: documentQueryKeys.all });
     toast.success("Upload complete", {
       description: "Your document is now being processed. This may take a few minutes.",
     });
@@ -81,7 +98,14 @@ export function DocumentsPage() {
         id: `retry-${doc.id}`,
         description: `${doc.title} is being processed again.`,
       });
-      loadData();
+      // Update the document status optimistically
+      queryClient.setQueryData(
+        documentQueryKeys.list(user!.id),
+        (old: Document[] | undefined) =>
+          old?.map((d) =>
+            d.id === doc.id ? { ...d, status: "pending" as const, errorMessage: null } : d
+          ) ?? []
+      );
     } else {
       toast.error("Retry failed", {
         id: `retry-${doc.id}`,
@@ -90,22 +114,28 @@ export function DocumentsPage() {
     }
   };
 
-  const handleDocumentUpdate = useCallback((updatedDoc: Document) => {
-    setDocuments((prev) =>
-      prev.map((d) => (d.id === updatedDoc.id ? updatedDoc : d)),
-    );
+  const handleDocumentUpdate = useCallback(
+    (updatedDoc: Document) => {
+      // Update document in cache
+      queryClient.setQueryData(
+        documentQueryKeys.list(user!.id),
+        (old: Document[] | undefined) =>
+          old?.map((d) => (d.id === updatedDoc.id ? updatedDoc : d)) ?? []
+      );
 
-    // Show toast notifications for status changes
-    if (updatedDoc.status === "completed") {
-      toast.success("Document ready", {
-        description: `${updatedDoc.title} has been processed successfully.`,
-      });
-    } else if (updatedDoc.status === "failed") {
-      toast.error("Processing failed", {
-        description: updatedDoc.errorMessage || `Failed to process ${updatedDoc.title}`,
-      });
-    }
-  }, []);
+      // Show toast notifications for status changes
+      if (updatedDoc.status === "completed") {
+        toast.success("Document ready", {
+          description: `${updatedDoc.title} has been processed successfully.`,
+        });
+      } else if (updatedDoc.status === "failed") {
+        toast.error("Processing failed", {
+          description: updatedDoc.errorMessage || `Failed to process ${updatedDoc.title}`,
+        });
+      }
+    },
+    [queryClient, user]
+  );
 
   const formatFileSize = (bytes: number) => {
     if (bytes === 0) return "0 B";
@@ -164,7 +194,7 @@ export function DocumentsPage() {
             onDelete={handleDelete}
             onRetry={handleRetry}
             onDocumentUpdate={handleDocumentUpdate}
-            loading={loading}
+            loading={documentsLoading}
           />
         </div>
       </div>
