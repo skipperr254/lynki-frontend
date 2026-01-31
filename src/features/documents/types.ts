@@ -14,6 +14,7 @@ export interface Document {
   status: ProcessingStatus;
   createdAt: string;
   updatedAt: string;
+  errorMessage?: string | null;
 }
 
 export interface UploadStatus {

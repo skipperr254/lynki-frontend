@@ -9,9 +9,10 @@ import {
   RefreshCw,
   BookOpen,
   Play,
+  AlertCircle,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,17 +31,26 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { Document } from "../types";
 import {
   fetchDocumentQuiz,
   subscribeToQuizUpdates,
 } from "@/features/quiz/services/quizService";
 import type { QuizListItem } from "@/types/quiz";
+import { supabase } from "@/lib/supabase";
+import type { Database } from "@/types/database";
 
 interface DocumentsListProps {
   documents: Document[];
   onDelete: (id: string, filePath: string) => void;
   onRetry?: (doc: Document) => void;
+  onDocumentUpdate?: (doc: Document) => void;
   loading: boolean;
 }
 
@@ -48,16 +58,58 @@ export function DocumentsList({
   documents,
   onDelete,
   onRetry,
+  onDocumentUpdate,
   loading,
 }: DocumentsListProps) {
   const navigate = useNavigate();
   const [quizzes, setQuizzes] = useState<Map<string, QuizListItem>>(new Map());
+  const [retryingDocs, setRetryingDocs] = useState<Set<string>>(new Set());
 
   // Memoize document IDs to prevent unnecessary re-fetches
   const documentIds = useMemo(
     () => documents.map((doc) => doc.id).join(","),
     [documents],
   );
+
+  // Subscribe to document status updates
+  useEffect(() => {
+    if (documents.length === 0) return;
+
+    const channel = supabase
+      .channel("document-status-updates")
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "documents",
+          filter: `id=in.(${documents.map((d) => d.id).join(",")})`,
+        },
+        (payload) => {
+          if (payload.new && onDocumentUpdate) {
+            const data =
+              payload.new as Database["public"]["Tables"]["documents"]["Row"];
+            onDocumentUpdate({
+              id: data.id,
+              userId: data.user_id,
+              title: data.title,
+              filePath: data.file_path,
+              fileType: data.file_type,
+              fileSize: data.file_size,
+              status: data.status as Document["status"],
+              createdAt: data.created_at,
+              updatedAt: data.updated_at,
+              errorMessage: data.error_message,
+            });
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [documentIds, onDocumentUpdate]);
 
   useEffect(() => {
     // Load quiz status for each document
@@ -110,11 +162,23 @@ export function DocumentsList({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   };
 
-  const handleRetry = (doc: Document) => {
-    if (onRetry) {
-      onRetry(doc);
-    }
-  };
+  const handleRetry = useCallback(
+    async (doc: Document) => {
+      if (!onRetry) return;
+
+      setRetryingDocs((prev) => new Set(prev).add(doc.id));
+      try {
+        await onRetry(doc);
+      } finally {
+        setRetryingDocs((prev) => {
+          const next = new Set(prev);
+          next.delete(doc.id);
+          return next;
+        });
+      }
+    },
+    [onRetry],
+  );
 
   if (loading) {
     return (
@@ -173,35 +237,59 @@ export function DocumentsList({
                 </TableCell>
                 <TableCell>{formatFileSize(doc.fileSize)}</TableCell>
                 <TableCell>
-                  {doc.status === "processing" || doc.status === "pending" ? (
-                    <div className="flex items-center text-blue-500 text-xs">
-                      <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                      Processing
-                    </div>
-                  ) : doc.status === "completed" ? (
-                    <div className="flex items-center text-green-600 text-xs">
-                      <CheckCircle className="w-3 h-3 mr-1" />
-                      Ready
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <div className="flex items-center text-red-500 text-xs">
-                        <XCircle className="w-3 h-3 mr-1" />
-                        Failed
+                  <TooltipProvider>
+                    {doc.status === "pending" ? (
+                      <div className="flex items-center text-amber-500 text-xs">
+                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                        Queued
                       </div>
-                      {onRetry && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-2 text-xs"
-                          onClick={() => handleRetry(doc)}
-                        >
-                          <RefreshCw className="w-3 h-3 mr-1" />
-                          Retry
-                        </Button>
-                      )}
-                    </div>
-                  )}
+                    ) : doc.status === "processing" ? (
+                      <div className="flex items-center text-blue-500 text-xs">
+                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                        Processing
+                      </div>
+                    ) : doc.status === "completed" ? (
+                      <div className="flex items-center text-green-600 text-xs">
+                        <CheckCircle className="w-3 h-3 mr-1" />
+                        Ready
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="flex items-center text-red-500 text-xs cursor-help">
+                              <XCircle className="w-3 h-3 mr-1" />
+                              Failed
+                              {doc.errorMessage && (
+                                <AlertCircle className="w-3 h-3 ml-1" />
+                              )}
+                            </div>
+                          </TooltipTrigger>
+                          {doc.errorMessage && (
+                            <TooltipContent className="max-w-xs">
+                              <p className="text-xs">{doc.errorMessage}</p>
+                            </TooltipContent>
+                          )}
+                        </Tooltip>
+                        {onRetry && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2 text-xs"
+                            onClick={() => handleRetry(doc)}
+                            disabled={retryingDocs.has(doc.id)}
+                          >
+                            {retryingDocs.has(doc.id) ? (
+                              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                            ) : (
+                              <RefreshCw className="w-3 h-3 mr-1" />
+                            )}
+                            Retry
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </TooltipProvider>
                 </TableCell>
                 <TableCell>
                   {(() => {

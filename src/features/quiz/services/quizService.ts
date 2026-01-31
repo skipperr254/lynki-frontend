@@ -365,6 +365,7 @@ export async function triggerQuizGeneration(
 
 /**
  * Subscribe to quiz generation status updates.
+ * Fetches full quiz details including question count when status changes.
  */
 export function subscribeToQuizUpdates(
   documentId: string,
@@ -380,10 +381,25 @@ export function subscribeToQuizUpdates(
         table: "quizzes",
         filter: `document_id=eq.${documentId}`,
       },
-      (payload) => {
+      async (payload) => {
         if (payload.new) {
           const data =
             payload.new as Database["public"]["Tables"]["quizzes"]["Row"];
+
+          // Fetch question count when quiz is completed
+          let questionCount = 0;
+          if (data.generation_status === "completed") {
+            try {
+              const { count } = await supabase
+                .from("questions")
+                .select("id", { count: "exact", head: true })
+                .eq("quiz_id", data.id);
+              questionCount = count ?? 0;
+            } catch {
+              // Ignore count errors, will show 0
+            }
+          }
+
           callback({
             id: data.id,
             title: data.title,
@@ -391,7 +407,7 @@ export function subscribeToQuizUpdates(
             documentId: data.document_id ?? undefined,
             documentTitle: undefined,
             generationStatus: data.generation_status,
-            questionCount: 0,
+            questionCount,
             createdAt: data.created_at,
           });
         }

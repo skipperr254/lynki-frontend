@@ -5,6 +5,110 @@ const BUCKET_NAME = "course-materials";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
 
 /**
+ * Retry configuration for API calls
+ */
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelayMs: 1000,
+  maxDelayMs: 10000,
+};
+
+/**
+ * Sleep utility for retry delays
+ */
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Calculate exponential backoff delay
+ */
+const getRetryDelay = (attempt: number): number => {
+  const delay = RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt);
+  return Math.min(delay, RETRY_CONFIG.maxDelayMs);
+};
+
+/**
+ * Wake up the Render backend (handles cold starts)
+ * Call this early (e.g., on page load) so the API is ready when needed
+ */
+export async function wakeUpBackend(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout for cold start
+
+    const response = await fetch(`${API_URL.replace("/api/v1", "")}/`, {
+      method: "GET",
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    return response.ok;
+  } catch (err) {
+    console.warn("Backend wake-up ping failed (may be cold starting):", err);
+    return false;
+  }
+}
+
+/**
+ * Trigger backend processing with retry logic
+ * Returns { success, error? } to allow graceful handling
+ */
+async function triggerBackendProcessing(
+  documentId: string,
+): Promise<{ success: boolean; error?: string }> {
+  for (let attempt = 0; attempt <= RETRY_CONFIG.maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
+      const response = await fetch(`${API_URL}/documents/process/${documentId}`, {
+        method: "POST",
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        return { success: true };
+      }
+
+      // Non-retryable HTTP errors (4xx)
+      if (response.status >= 400 && response.status < 500) {
+        const errorText = await response.text().catch(() => "Unknown error");
+        return { success: false, error: `Server rejected request: ${errorText}` };
+      }
+
+      // Retryable errors (5xx, network issues)
+      if (attempt < RETRY_CONFIG.maxRetries) {
+        const delay = getRetryDelay(attempt);
+        console.warn(
+          `Processing trigger failed (attempt ${attempt + 1}/${RETRY_CONFIG.maxRetries + 1}), retrying in ${delay}ms...`,
+        );
+        await sleep(delay);
+      }
+    } catch (err) {
+      const isTimeout = err instanceof Error && err.name === "AbortError";
+      const errorMessage = isTimeout
+        ? "Request timed out"
+        : err instanceof Error
+          ? err.message
+          : "Unknown error";
+
+      if (attempt < RETRY_CONFIG.maxRetries) {
+        const delay = getRetryDelay(attempt);
+        console.warn(
+          `Processing trigger error (attempt ${attempt + 1}/${RETRY_CONFIG.maxRetries + 1}): ${errorMessage}, retrying in ${delay}ms...`,
+        );
+        await sleep(delay);
+      } else {
+        return { success: false, error: errorMessage };
+      }
+    }
+  }
+
+  return { success: false, error: "Max retries exceeded" };
+}
+
+/**
  * Upload a file to Supabase Storage and save metadata to database.
  * @param file - The file to upload
  * @param userId - The user ID
@@ -66,22 +170,20 @@ export async function uploadDocument(
 
   onProgress?.(80);
 
-  // 3. Trigger Backend Processing
-  try {
-    const response = await fetch(
-      `${API_URL}/documents/process/${document.id}`,
-      {
-        method: "POST",
-      },
-    );
+  // 3. Trigger Backend Processing with retry logic
+  const processingResult = await triggerBackendProcessing(document.id);
 
-    if (!response.ok) {
-      console.warn("Failed to trigger background processing");
-      // We don't throw here because the file IS uploaded, just not processed yet.
-      // The user can see it's "pending" in the UI ideally.
-    }
-  } catch (err) {
-    console.warn("API unavailable for processing", err);
+  if (!processingResult.success) {
+    // Update document status to indicate processing failed to start
+    await supabase
+      .from("documents")
+      .update({
+        status: "failed",
+        error_message: `Failed to start processing: ${processingResult.error}`,
+      })
+      .eq("id", document.id);
+
+    console.error("Failed to trigger processing:", processingResult.error);
   }
 
   onProgress?.(100);
@@ -93,10 +195,34 @@ export async function uploadDocument(
     filePath: document.file_path,
     fileType: document.file_type,
     fileSize: document.file_size,
-    status: document.status as any,
+    status: processingResult.success ? (document.status as Document["status"]) : "failed",
     createdAt: document.created_at,
     updatedAt: document.updated_at,
+    errorMessage: processingResult.success ? undefined : processingResult.error,
   };
+}
+
+/**
+ * Retry processing for a failed document
+ */
+export async function retryDocumentProcessing(
+  documentId: string,
+): Promise<{ success: boolean; error?: string }> {
+  // Reset document status to pending
+  const { error: updateError } = await supabase
+    .from("documents")
+    .update({
+      status: "pending",
+      error_message: null,
+    })
+    .eq("id", documentId);
+
+  if (updateError) {
+    return { success: false, error: "Failed to reset document status" };
+  }
+
+  // Trigger processing
+  return triggerBackendProcessing(documentId);
 }
 
 /**
@@ -120,9 +246,10 @@ export async function fetchUserDocuments(userId: string): Promise<Document[]> {
     filePath: doc.file_path,
     fileType: doc.file_type,
     fileSize: doc.file_size,
-    status: doc.status as any,
+    status: doc.status as Document["status"],
     createdAt: doc.created_at,
     updatedAt: doc.updated_at,
+    errorMessage: doc.error_message,
   }));
 }
 

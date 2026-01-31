@@ -7,10 +7,13 @@ import {
   fetchUserDocuments,
   getUserStorageStats,
   deleteDocument,
+  retryDocumentProcessing,
+  wakeUpBackend,
 } from "../services/documentService";
 import { FileUploader } from "./FileUploader";
 import { DocumentsList } from "./DocumentsList";
 import type { Document, StorageStats } from "../types";
+import { toast } from "sonner";
 
 export function DocumentsPage() {
   const { user } = useAuth();
@@ -39,6 +42,12 @@ export function DocumentsPage() {
 
   useEffect(() => {
     loadData();
+    // Wake up Render backend on page load to handle cold starts
+    wakeUpBackend().then((isAwake) => {
+      if (!isAwake) {
+        console.log("Backend may be cold starting, first upload may take longer");
+      }
+    });
   }, [loadData]);
 
   const handleDelete = async (id: string, filePath: string) => {
@@ -57,7 +66,46 @@ export function DocumentsPage() {
 
   const handleUploadComplete = () => {
     loadData();
+    toast.success("Upload complete", {
+      description: "Your document is now being processed. This may take a few minutes.",
+    });
   };
+
+  const handleRetry = async (doc: Document) => {
+    toast.loading("Retrying processing...", { id: `retry-${doc.id}` });
+
+    const result = await retryDocumentProcessing(doc.id);
+
+    if (result.success) {
+      toast.success("Processing restarted", {
+        id: `retry-${doc.id}`,
+        description: `${doc.title} is being processed again.`,
+      });
+      loadData();
+    } else {
+      toast.error("Retry failed", {
+        id: `retry-${doc.id}`,
+        description: result.error || "Please try again later.",
+      });
+    }
+  };
+
+  const handleDocumentUpdate = useCallback((updatedDoc: Document) => {
+    setDocuments((prev) =>
+      prev.map((d) => (d.id === updatedDoc.id ? updatedDoc : d)),
+    );
+
+    // Show toast notifications for status changes
+    if (updatedDoc.status === "completed") {
+      toast.success("Document ready", {
+        description: `${updatedDoc.title} has been processed successfully.`,
+      });
+    } else if (updatedDoc.status === "failed") {
+      toast.error("Processing failed", {
+        description: updatedDoc.errorMessage || `Failed to process ${updatedDoc.title}`,
+      });
+    }
+  }, []);
 
   const formatFileSize = (bytes: number) => {
     if (bytes === 0) return "0 B";
@@ -114,6 +162,8 @@ export function DocumentsPage() {
           <DocumentsList
             documents={documents}
             onDelete={handleDelete}
+            onRetry={handleRetry}
+            onDocumentUpdate={handleDocumentUpdate}
             loading={loading}
           />
         </div>
