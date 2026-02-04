@@ -9,13 +9,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import {
-  Upload,
-  FileText,
-  CheckCircle,
-  X,
-  AlertCircle,
-} from "lucide-react";
+import { Upload, FileText, CheckCircle, X, AlertCircle } from "lucide-react";
 import { useFileUpload } from "@/features/documents/hooks/useFileUpload";
 
 interface UploadModalProps {
@@ -70,7 +64,8 @@ export function UploadModal({
         <DialogHeader>
           <DialogTitle>Upload Study Materials</DialogTitle>
           <DialogDescription>
-            Upload your course materials (PDF, DOCX, PPTX, images). Max 10MB per file.
+            Upload your course materials (PDF, DOCX, PPTX, images). Max 10MB per
+            file.
           </DialogDescription>
         </DialogHeader>
 
@@ -158,20 +153,22 @@ export function UploadModal({
 
           {allComplete && (
             <div className="flex justify-end gap-2 pt-2">
-              <Button variant="outline" onClick={() => {
-                resetUploads();
-              }}>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  resetUploads();
+                }}
+              >
                 Upload More
               </Button>
-              <Button onClick={handleClose}>
-                Done
-              </Button>
+              <Button onClick={handleClose}>Done</Button>
             </div>
           )}
 
           {!hasUploads && (
             <p className="text-xs text-center text-muted-foreground">
-              Your materials will be analyzed and concepts extracted automatically.
+              Your materials will be analyzed and concepts extracted
+              automatically.
             </p>
           )}
         </div>

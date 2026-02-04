@@ -46,11 +46,7 @@ export function Header() {
 
           {user && (
             <nav className="hidden md:flex items-center gap-1">
-              <NavLink
-                to="/home"
-                className={navLinkClass}
-                end
-              >
+              <NavLink to="/home" className={navLinkClass} end>
                 <Home className="w-4 h-4" />
                 Home
               </NavLink>

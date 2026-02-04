@@ -48,11 +48,15 @@ export function StudySession({
   const [showHint, setShowHint] = useState(false);
   const [sessionComplete, setSessionComplete] = useState(false);
   const [wasMastered, setWasMastered] = useState(false);
-  const [questionStartTime, setQuestionStartTime] = useState<number>(Date.now());
+  const [questionStartTime, setQuestionStartTime] = useState<number>(
+    Date.now(),
+  );
 
   // Track progress towards mastery in this session
   const [sessionCorrectCount, setSessionCorrectCount] = useState(0);
-  const [totalCorrectNeeded, setTotalCorrectNeeded] = useState<number>(MASTERY_CONFIG.CORRECT_TO_MASTER);
+  const [totalCorrectNeeded, setTotalCorrectNeeded] = useState<number>(
+    MASTERY_CONFIG.CORRECT_TO_MASTER,
+  );
 
   useEffect(() => {
     async function loadSession() {
@@ -64,7 +68,10 @@ export function StudySession({
       if (newSession) {
         setSession(newSession);
         setTotalCorrectNeeded(
-          Math.max(1, MASTERY_CONFIG.CORRECT_TO_MASTER - newSession.correctCount)
+          Math.max(
+            1,
+            MASTERY_CONFIG.CORRECT_TO_MASTER - newSession.correctCount,
+          ),
         );
       }
       setLoading(false);
@@ -96,7 +103,7 @@ export function StudySession({
           isCorrect: correct,
           timeSpentMs: timeSpent,
         },
-        session.sessionId
+        session.sessionId,
       );
 
       // Update session state
@@ -109,7 +116,7 @@ export function StudySession({
         setWasMastered(true);
       }
     },
-    [session, currentQuestion, user, showFeedback, questionStartTime]
+    [session, currentQuestion, user, showFeedback, questionStartTime],
   );
 
   const handleNext = useCallback(() => {
@@ -148,7 +155,7 @@ export function StudySession({
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
+      <div className="flex items-center justify-center min-h-100">
         <div className="text-center space-y-4">
           <Loader2 className="w-12 h-12 animate-spin mx-auto text-primary" />
           <p className="text-muted-foreground">Loading study session...</p>
@@ -256,7 +263,7 @@ export function StudySession({
 
   const progressPercent = Math.min(
     100,
-    (sessionCorrectCount / totalCorrectNeeded) * 100
+    (sessionCorrectCount / totalCorrectNeeded) * 100,
   );
 
   return (
@@ -350,14 +357,16 @@ export function StudySession({
                       <p>{option}</p>
 
                       {/* Feedback for this option */}
-                      {showResult && isCorrectOption && currentQuestion.explanation && (
-                        <div className="mt-3 flex items-start gap-2">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
-                          <p className="text-sm text-emerald-700 dark:text-emerald-300">
-                            {currentQuestion.explanation}
-                          </p>
-                        </div>
-                      )}
+                      {showResult &&
+                        isCorrectOption &&
+                        currentQuestion.explanation && (
+                          <div className="mt-3 flex items-start gap-2">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                            <p className="text-sm text-emerald-700 dark:text-emerald-300">
+                              {currentQuestion.explanation}
+                            </p>
+                          </div>
+                        )}
                     </div>
                   </div>
                 </button>
@@ -387,7 +396,8 @@ export function StudySession({
           {showFeedback && (
             <div className="pt-4 flex justify-end">
               <Button onClick={handleNext} className="gap-2">
-                {session.currentQuestionIndex === session.questions.length - 1 ||
+                {session.currentQuestionIndex ===
+                  session.questions.length - 1 ||
                 sessionCorrectCount >= totalCorrectNeeded
                   ? "See Results"
                   : "Next Question"}

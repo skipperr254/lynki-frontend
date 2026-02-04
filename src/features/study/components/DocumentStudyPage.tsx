@@ -5,10 +5,7 @@ import { useAuth } from "@/features/auth";
 import { Header } from "@/components/layout/Header";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import {
-  Card,
-  CardContent,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Accordion,
   AccordionContent,
@@ -46,7 +43,9 @@ export function DocumentStudyPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const [studyingConceptId, setStudyingConceptId] = useState<string | null>(null);
+  const [studyingConceptId, setStudyingConceptId] = useState<string | null>(
+    null,
+  );
 
   const {
     data: progress,
@@ -229,7 +228,9 @@ export function DocumentStudyPage() {
               <CardContent className="pt-6">
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Overall Progress</span>
+                    <span className="text-sm font-medium">
+                      Overall Progress
+                    </span>
                     <span className="text-sm text-muted-foreground">
                       {progress.masteredConcepts}/{progress.totalConcepts}{" "}
                       concepts mastered
@@ -291,7 +292,9 @@ export function DocumentStudyPage() {
                           <div className="flex items-center gap-3">
                             {getStatusIcon(concept.status)}
                             <div>
-                              <p className="font-medium">{concept.conceptName}</p>
+                              <p className="font-medium">
+                                {concept.conceptName}
+                              </p>
                               <p className="text-sm text-muted-foreground line-clamp-1">
                                 {concept.conceptExplanation}
                               </p>
