@@ -6,13 +6,16 @@ export interface MaterialSummary {
   id: string;
   title: string;
   fileType: string;
-  status: "pending" | "processing" | "completed" | "error";
+  status: "pending" | "processing" | "completed" | "failed";
   createdAt: string;
+  updatedAt: string;
   totalConcepts: number;
   masteredConcepts: number;
   progressPercent: number;
   conceptsDueForReview: number;
   hasQuiz: boolean;
+  errorMessage: string | null;
+  isStuck: boolean; // processing for too long (> 10 minutes)
 }
 
 export interface ReviewItem {

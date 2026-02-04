@@ -76,39 +76,46 @@ export function DocumentsList({
   useEffect(() => {
     if (documents.length === 0) return;
 
-    const channel = supabase
-      .channel("document-status-updates")
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "documents",
-          filter: `id=in.(${documents.map((d) => d.id).join(",")})`,
-        },
-        (payload) => {
-          if (payload.new && onDocumentUpdate) {
-            const data =
-              payload.new as Database["public"]["Tables"]["documents"]["Row"];
-            onDocumentUpdate({
-              id: data.id,
-              userId: data.user_id,
-              title: data.title,
-              filePath: data.file_path,
-              fileType: data.file_type,
-              fileSize: data.file_size,
-              status: data.status as Document["status"],
-              createdAt: data.created_at,
-              updatedAt: data.updated_at,
-              errorMessage: data.error_message,
-            });
-          }
-        },
-      )
-      .subscribe();
+    // Create a channel for each document to avoid filter issues
+    const channels = documents.map((doc) => {
+      const channel = supabase
+        .channel(`document-${doc.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "documents",
+            filter: `id=eq.${doc.id}`,
+          },
+          (payload) => {
+            if (payload.new && onDocumentUpdate) {
+              const data =
+                payload.new as Database["public"]["Tables"]["documents"]["Row"];
+              onDocumentUpdate({
+                id: data.id,
+                userId: data.user_id,
+                title: data.title,
+                filePath: data.file_path,
+                fileType: data.file_type,
+                fileSize: data.file_size,
+                status: data.status as Document["status"],
+                createdAt: data.created_at,
+                updatedAt: data.updated_at,
+                errorMessage: data.error_message,
+              });
+            }
+          },
+        )
+        .subscribe();
+
+      return channel;
+    });
 
     return () => {
-      supabase.removeChannel(channel);
+      channels.forEach((channel) => {
+        supabase.removeChannel(channel);
+      });
     };
   }, [documentIds, onDocumentUpdate, documents]);
 

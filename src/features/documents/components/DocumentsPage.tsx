@@ -28,20 +28,27 @@ export function DocumentsPage() {
       hasWokenBackend.current = true;
       wakeUpBackend().then((isAwake) => {
         if (!isAwake) {
-          console.log("Backend may be cold starting, first upload may take longer");
+          console.log(
+            "Backend may be cold starting, first upload may take longer",
+          );
         }
       });
     }
   }, []);
 
   // Fetch documents with React Query
-  const {
-    data: documents = [],
-    isLoading: documentsLoading,
-  } = useQuery({
+  const { data: documents = [], isLoading: documentsLoading } = useQuery({
     queryKey: documentQueryKeys.list(user?.id ?? ""),
     queryFn: () => fetchUserDocuments(user!.id),
     enabled: !!user,
+    // Poll every 5 seconds if there are documents in processing/pending state
+    refetchInterval: (query) => {
+      const docs = query.state.data as typeof documents | undefined;
+      const hasProcessing = docs?.some(
+        (d) => d.status === "pending" || d.status === "processing",
+      );
+      return hasProcessing ? 5000 : false;
+    },
   });
 
   // Fetch storage stats with React Query
@@ -57,7 +64,7 @@ export function DocumentsPage() {
     // Optimistic update
     queryClient.setQueryData(
       documentQueryKeys.list(user!.id),
-      (old: Document[] | undefined) => old?.filter((d) => d.id !== id) ?? []
+      (old: Document[] | undefined) => old?.filter((d) => d.id !== id) ?? [],
     );
 
     try {
@@ -78,7 +85,8 @@ export function DocumentsPage() {
     // Invalidate queries to refetch
     queryClient.invalidateQueries({ queryKey: documentQueryKeys.all });
     toast.success("Upload complete", {
-      description: "Your document is now being processed. This may take a few minutes.",
+      description:
+        "Your document is now being processed. This may take a few minutes.",
     });
   };
 
@@ -97,8 +105,10 @@ export function DocumentsPage() {
         documentQueryKeys.list(user!.id),
         (old: Document[] | undefined) =>
           old?.map((d) =>
-            d.id === doc.id ? { ...d, status: "pending" as const, errorMessage: null } : d
-          ) ?? []
+            d.id === doc.id
+              ? { ...d, status: "pending" as const, errorMessage: null }
+              : d,
+          ) ?? [],
       );
     } else {
       toast.error("Retry failed", {
@@ -114,7 +124,7 @@ export function DocumentsPage() {
       queryClient.setQueryData(
         documentQueryKeys.list(user!.id),
         (old: Document[] | undefined) =>
-          old?.map((d) => (d.id === updatedDoc.id ? updatedDoc : d)) ?? []
+          old?.map((d) => (d.id === updatedDoc.id ? updatedDoc : d)) ?? [],
       );
 
       // Show toast notifications for status changes
@@ -124,11 +134,12 @@ export function DocumentsPage() {
         });
       } else if (updatedDoc.status === "failed") {
         toast.error("Processing failed", {
-          description: updatedDoc.errorMessage || `Failed to process ${updatedDoc.title}`,
+          description:
+            updatedDoc.errorMessage || `Failed to process ${updatedDoc.title}`,
         });
       }
     },
-    [queryClient, user]
+    [queryClient, user],
   );
 
   const formatFileSize = (bytes: number) => {

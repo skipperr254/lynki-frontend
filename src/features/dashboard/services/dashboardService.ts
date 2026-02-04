@@ -1,14 +1,33 @@
 import { supabase } from "@/lib/supabase";
+import { retryDocumentProcessing as retryDocProcessing } from "@/features/documents/services/documentService";
 import type { DashboardData, MaterialSummary, ReviewItem } from "../types";
+
+// Time threshold for considering a document as "stuck" (10 minutes)
+const STUCK_THRESHOLD_MS = 10 * 60 * 1000;
+
+/**
+ * Retry processing a failed or stuck document
+ * Wraps the documentService function for dashboard use
+ */
+export async function retryDocumentProcessing(
+  documentId: string,
+): Promise<boolean> {
+  const result = await retryDocProcessing(documentId);
+  return result.success;
+}
 
 /**
  * Fetch all dashboard data for a user
  */
-export async function fetchDashboardData(userId: string): Promise<DashboardData> {
+export async function fetchDashboardData(
+  userId: string,
+): Promise<DashboardData> {
   // Fetch all user's documents
   const { data: documents, error: docsError } = await supabase
     .from("documents")
-    .select("id, title, file_type, status, created_at")
+    .select(
+      "id, title, file_type, status, created_at, updated_at, error_message",
+    )
     .eq("user_id", userId)
     .order("created_at", { ascending: false });
 
@@ -18,20 +37,24 @@ export async function fetchDashboardData(userId: string): Promise<DashboardData>
   }
 
   // For completed documents, fetch progress data
-  const completedDocs = documents?.filter((d) => d.status === "completed") || [];
+  const completedDocs =
+    documents?.filter((d) => d.status === "completed") || [];
   const docIds = completedDocs.map((d) => d.id);
 
   // Fetch topics and concepts for completed documents
-  const { data: topics } = docIds.length > 0
-    ? await supabase
-        .from("topics")
-        .select(`
+  const { data: topics } =
+    docIds.length > 0
+      ? await supabase
+          .from("topics")
+          .select(
+            `
           id,
           document_id,
           concepts (id)
-        `)
-        .in("document_id", docIds)
-    : { data: [] };
+        `,
+          )
+          .in("document_id", docIds)
+      : { data: [] };
 
   // Build concept count per document
   const conceptCountByDoc = new Map<string, number>();
@@ -42,21 +65,26 @@ export async function fetchDashboardData(userId: string): Promise<DashboardData>
   });
 
   // Get all concept IDs
-  const allConceptIds = topics?.flatMap(
-    (t) => (t.concepts as { id: string }[])?.map((c) => c.id) || []
-  ) || [];
+  const allConceptIds =
+    topics?.flatMap(
+      (t) => (t.concepts as { id: string }[])?.map((c) => c.id) || [],
+    ) || [];
 
   // Fetch user's mastery data
-  const { data: masteryData } = allConceptIds.length > 0
-    ? await supabase
-        .from("user_concept_mastery")
-        .select("*")
-        .eq("user_id", userId)
-        .in("concept_id", allConceptIds)
-    : { data: [] };
+  const { data: masteryData } =
+    allConceptIds.length > 0
+      ? await supabase
+          .from("user_concept_mastery")
+          .select("*")
+          .eq("user_id", userId)
+          .in("concept_id", allConceptIds)
+      : { data: [] };
 
   // Build mastery map by document
-  const masteryByDoc = new Map<string, { mastered: number; total: number; dueForReview: number }>();
+  const masteryByDoc = new Map<
+    string,
+    { mastered: number; total: number; dueForReview: number }
+  >();
   const conceptToDoc = new Map<string, string>();
 
   topics?.forEach((topic) => {
@@ -66,7 +94,11 @@ export async function fetchDashboardData(userId: string): Promise<DashboardData>
     });
 
     if (!masteryByDoc.has(topic.document_id)) {
-      masteryByDoc.set(topic.document_id, { mastered: 0, total: 0, dueForReview: 0 });
+      masteryByDoc.set(topic.document_id, {
+        mastered: 0,
+        total: 0,
+        dueForReview: 0,
+      });
     }
     const entry = masteryByDoc.get(topic.document_id)!;
     entry.total += concepts.length;
@@ -115,22 +147,33 @@ export async function fetchDashboardData(userId: string): Promise<DashboardData>
   }
 
   // Check for quizzes
-  const { data: quizzes } = docIds.length > 0
-    ? await supabase
-        .from("quizzes")
-        .select("document_id, generation_status")
-        .in("document_id", docIds)
-    : { data: [] };
+  const { data: quizzes } =
+    docIds.length > 0
+      ? await supabase
+          .from("quizzes")
+          .select("document_id, generation_status")
+          .in("document_id", docIds)
+      : { data: [] };
 
   const quizByDoc = new Map(
-    quizzes?.map((q) => [q.document_id, q.generation_status === "completed"]) || []
+    quizzes?.map((q) => [q.document_id, q.generation_status === "completed"]) ||
+      [],
   );
 
   // Build materials list
+  const nowMs = Date.now();
   const materials: MaterialSummary[] = (documents || []).map((doc) => {
     const masteryInfo = masteryByDoc.get(doc.id);
     const totalConcepts = masteryInfo?.total || 0;
     const masteredConcepts = masteryInfo?.mastered || 0;
+
+    // Check if document is stuck (processing for too long)
+    const updatedAt = doc.updated_at
+      ? new Date(doc.updated_at).getTime()
+      : new Date(doc.created_at).getTime();
+    const isStuck =
+      (doc.status === "pending" || doc.status === "processing") &&
+      nowMs - updatedAt > STUCK_THRESHOLD_MS;
 
     return {
       id: doc.id,
@@ -138,29 +181,37 @@ export async function fetchDashboardData(userId: string): Promise<DashboardData>
       fileType: doc.file_type,
       status: doc.status as MaterialSummary["status"],
       createdAt: doc.created_at,
+      updatedAt: doc.updated_at || doc.created_at,
       totalConcepts,
       masteredConcepts,
-      progressPercent: totalConcepts > 0 ? Math.round((masteredConcepts / totalConcepts) * 100) : 0,
+      progressPercent:
+        totalConcepts > 0
+          ? Math.round((masteredConcepts / totalConcepts) * 100)
+          : 0,
       conceptsDueForReview: masteryInfo?.dueForReview || 0,
       hasQuiz: quizByDoc.get(doc.id) || false,
+      errorMessage: doc.error_message || null,
+      isStuck,
     };
   });
 
   // Calculate totals
   const totalConceptsMastered = Array.from(masteryByDoc.values()).reduce(
     (sum, m) => sum + m.mastered,
-    0
+    0,
   );
   const totalConcepts = Array.from(masteryByDoc.values()).reduce(
     (sum, m) => sum + m.total,
-    0
+    0,
   );
 
   // Determine next study item
   let nextStudyItem: DashboardData["nextStudyItem"] = null;
 
   // Priority: in-progress concepts, then new material, then reviews
-  const inProgressMastery = masteryData?.find((m) => m.status === "in_progress");
+  const inProgressMastery = masteryData?.find(
+    (m) => m.status === "in_progress",
+  );
   if (inProgressMastery) {
     const docId = conceptToDoc.get(inProgressMastery.concept_id);
     const doc = documents?.find((d) => d.id === docId);
@@ -219,7 +270,10 @@ export async function fetchDashboardData(userId: string): Promise<DashboardData>
     totalMaterials: materials.length,
     totalConceptsMastered,
     totalConcepts,
-    overallProgress: totalConcepts > 0 ? Math.round((totalConceptsMastered / totalConcepts) * 100) : 0,
+    overallProgress:
+      totalConcepts > 0
+        ? Math.round((totalConceptsMastered / totalConcepts) * 100)
+        : 0,
     nextStudyItem,
   };
 }

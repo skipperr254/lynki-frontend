@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/features/auth";
@@ -26,10 +26,11 @@ import {
   AlertCircle,
   RefreshCw,
 } from "lucide-react";
-import { fetchDashboardData } from "../services/dashboardService";
+import { fetchDashboardData, retryDocumentProcessing } from "../services/dashboardService";
 import { UploadModal } from "./UploadModal";
 import type { MaterialSummary } from "../types";
 import { formatDistanceToNow } from "date-fns";
+import { supabase } from "@/lib/supabase";
 
 const dashboardQueryKeys = {
   data: (userId: string) => ["dashboard", userId] as const,
@@ -40,6 +41,7 @@ export function Dashboard() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [retryingDocId, setRetryingDocId] = useState<string | null>(null);
 
   const {
     data: dashboardData,
@@ -57,13 +59,85 @@ export function Dashboard() {
     });
   };
 
+  // Subscribe to real-time document status updates
+  useEffect(() => {
+    if (!user) return;
+
+    const channel = supabase
+      .channel("dashboard-document-updates")
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "documents",
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          // Invalidate dashboard query when any document status changes
+          if (payload.new) {
+            queryClient.invalidateQueries({
+              queryKey: dashboardQueryKeys.data(user.id),
+            });
+          }
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "quizzes",
+        },
+        (payload) => {
+          // Refresh when a new quiz is created (quiz generation complete)
+          if (payload.new) {
+            queryClient.invalidateQueries({
+              queryKey: dashboardQueryKeys.data(user.id),
+            });
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user, queryClient]);
+
   const handleContinueStudying = () => {
     if (dashboardData?.nextStudyItem) {
       navigate(`/study/${dashboardData.nextStudyItem.documentId}`);
     }
   };
 
+  const handleRetryDocument = async (e: React.MouseEvent, documentId: string) => {
+    e.stopPropagation(); // Prevent card click
+    setRetryingDocId(documentId);
+    try {
+      const success = await retryDocumentProcessing(documentId);
+      if (success) {
+        // Refetch dashboard data
+        queryClient.invalidateQueries({
+          queryKey: dashboardQueryKeys.data(user!.id),
+        });
+      }
+    } finally {
+      setRetryingDocId(null);
+    }
+  };
+
   const getStatusBadge = (material: MaterialSummary) => {
+    // Check for stuck documents first
+    if (material.isStuck) {
+      return (
+        <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+          <AlertCircle className="w-3 h-3" />
+          Stuck
+        </span>
+      );
+    }
+
     switch (material.status) {
       case "pending":
         return (
@@ -79,11 +153,11 @@ export function Dashboard() {
             Processing
           </span>
         );
-      case "error":
+      case "failed":
         return (
           <span className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
             <AlertCircle className="w-3 h-3" />
-            Error
+            Failed
           </span>
         );
       default:
@@ -101,7 +175,7 @@ export function Dashboard() {
       <>
         <Header />
         <div className="min-h-screen bg-background p-6 md:p-12 pt-28">
-          <div className="flex items-center justify-center min-h-[400px]">
+          <div className="flex items-center justify-center min-h-100">
             <div className="text-center space-y-4">
               <Loader2 className="w-12 h-12 animate-spin mx-auto text-primary" />
               <p className="text-muted-foreground">Loading your dashboard...</p>
@@ -145,7 +219,7 @@ export function Dashboard() {
 
   const hasNoMaterials = !dashboardData || dashboardData.materials.length === 0;
   const hasStudyableMaterials = dashboardData?.materials.some(
-    (m) => m.status === "completed" && m.totalConcepts > 0
+    (m) => m.status === "completed" && m.totalConcepts > 0,
   );
 
   return (
@@ -172,7 +246,7 @@ export function Dashboard() {
 
             {/* Primary Action Card */}
             {hasStudyableMaterials && dashboardData?.nextStudyItem ? (
-              <Card className="bg-gradient-to-br from-primary/10 via-primary/5 to-transparent border-primary/20">
+              <Card className="bg-linear-to-br from-primary/10 via-primary/5 to-transparent border-primary/20">
                 <CardContent className="pt-6">
                   <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                     <div className="space-y-1">
@@ -215,7 +289,7 @@ export function Dashboard() {
                 </CardContent>
               </Card>
             ) : (
-              <Card className="bg-gradient-to-br from-muted/50 to-transparent border-dashed">
+              <Card className="bg-linear-to-br from-muted/50 to-transparent border-dashed">
                 <CardContent className="pt-6">
                   <div className="flex flex-col items-center text-center gap-4 py-4">
                     <div className="p-4 bg-primary/10 rounded-full">
@@ -307,7 +381,9 @@ export function Dashboard() {
                       <p className="text-2xl font-bold">
                         {dashboardData.reviewsDue.length}
                       </p>
-                      <p className="text-xs text-muted-foreground">Reviews Due</p>
+                      <p className="text-xs text-muted-foreground">
+                        Reviews Due
+                      </p>
                     </div>
                   </div>
                 </CardContent>
@@ -316,100 +392,149 @@ export function Dashboard() {
           )}
 
           {/* Materials List */}
-          {!hasNoMaterials && dashboardData && dashboardData.materials.length > 0 && (
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between">
-                <div>
-                  <CardTitle>Your Materials</CardTitle>
-                  <CardDescription>
-                    Study materials and progress
-                  </CardDescription>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-2"
-                  onClick={() => setUploadModalOpen(true)}
-                >
-                  <Plus className="w-4 h-4" />
-                  Add New
-                </Button>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-3">
-                  {dashboardData.materials.map((material) => (
-                    <div
-                      key={material.id}
-                      className={`flex items-center gap-4 p-4 rounded-lg border transition-colors ${
-                        material.status === "completed"
-                          ? "hover:bg-muted/50 cursor-pointer"
-                          : "bg-muted/20"
-                      }`}
-                      onClick={() => {
-                        if (material.status === "completed") {
-                          navigate(`/study/${material.id}`);
-                        }
-                      }}
-                    >
-                      <div className="p-2 bg-muted rounded-lg shrink-0">
-                        <FileText className="w-5 h-5 text-muted-foreground" />
-                      </div>
-
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <h3 className="font-medium truncate">{material.title}</h3>
-                          {getStatusBadge(material)}
+          {!hasNoMaterials &&
+            dashboardData &&
+            dashboardData.materials.length > 0 && (
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between">
+                  <div>
+                    <CardTitle>Your Materials</CardTitle>
+                    <CardDescription>
+                      Study materials and progress
+                    </CardDescription>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-2"
+                    onClick={() => setUploadModalOpen(true)}
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add New
+                  </Button>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    {dashboardData.materials.map((material) => (
+                      <div
+                        key={material.id}
+                        className={`flex items-center gap-4 p-4 rounded-lg border transition-colors ${
+                          material.status === "completed"
+                            ? "hover:bg-muted/50 cursor-pointer"
+                            : "bg-muted/20"
+                        }`}
+                        onClick={() => {
+                          if (material.status === "completed") {
+                            navigate(`/study/${material.id}`);
+                          }
+                        }}
+                      >
+                        <div className="p-2 bg-muted rounded-lg shrink-0">
+                          <FileText className="w-5 h-5 text-muted-foreground" />
                         </div>
 
-                        {material.status === "completed" && material.totalConcepts > 0 && (
-                          <div className="mt-2 space-y-1">
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="text-muted-foreground">
-                                {material.masteredConcepts}/{material.totalConcepts} concepts
-                              </span>
-                              <span className="font-medium">{material.progressPercent}%</span>
-                            </div>
-                            <Progress value={material.progressPercent} className="h-1.5" />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-medium truncate">
+                              {material.title}
+                            </h3>
+                            {getStatusBadge(material)}
                           </div>
-                        )}
 
-                        {material.status === "completed" && material.totalConcepts === 0 && (
-                          <p className="text-xs text-muted-foreground mt-1">
-                            No concepts extracted yet
-                          </p>
-                        )}
+                          {material.status === "completed" &&
+                            material.totalConcepts > 0 && (
+                              <div className="mt-2 space-y-1">
+                                <div className="flex items-center justify-between text-xs">
+                                  <span className="text-muted-foreground">
+                                    {material.masteredConcepts}/
+                                    {material.totalConcepts} concepts
+                                  </span>
+                                  <span className="font-medium">
+                                    {material.progressPercent}%
+                                  </span>
+                                </div>
+                                <Progress
+                                  value={material.progressPercent}
+                                  className="h-1.5"
+                                />
+                              </div>
+                            )}
 
-                        {(material.status === "pending" || material.status === "processing") && (
-                          <p className="text-xs text-muted-foreground mt-1">
-                            Analyzing content...
-                          </p>
-                        )}
+                          {material.status === "completed" &&
+                            material.totalConcepts === 0 && (
+                              <p className="text-xs text-muted-foreground mt-1">
+                                No concepts extracted yet
+                              </p>
+                            )}
+
+                          {(material.status === "pending" ||
+                            material.status === "processing") &&
+                            !material.isStuck && (
+                              <p className="text-xs text-muted-foreground mt-1">
+                                Analyzing content...
+                              </p>
+                            )}
+
+                          {/* Show error message or stuck indicator */}
+                          {material.status === "failed" &&
+                            material.errorMessage && (
+                              <p className="text-xs text-red-600 dark:text-red-400 mt-1">
+                                {material.errorMessage}
+                              </p>
+                            )}
+
+                          {material.isStuck && (
+                            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                              Processing seems stuck. Try again?
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {material.conceptsDueForReview > 0 && (
+                            <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-900/30 px-2 py-1 rounded-full">
+                              <Clock className="w-3 h-3" />
+                              {material.conceptsDueForReview} due
+                            </span>
+                          )}
+
+                          {material.progressPercent === 100 && (
+                            <span className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                              <CheckCircle className="w-4 h-4" />
+                            </span>
+                          )}
+
+                          {/* Retry button for failed/stuck documents */}
+                          {(material.status === "failed" ||
+                            material.isStuck) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="gap-1"
+                              disabled={retryingDocId === material.id}
+                              onClick={(e) =>
+                                handleRetryDocument(e, material.id)
+                              }
+                            >
+                              {retryingDocId === material.id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <RefreshCw className="w-3 h-3" />
+                              )}
+                              Retry
+                            </Button>
+                          )}
+
+                          {material.status === "completed" && (
+                            <ChevronRight className="w-5 h-5 text-muted-foreground" />
+                          )}
+                        </div>
                       </div>
-
-                      <div className="flex items-center gap-2 shrink-0">
-                        {material.conceptsDueForReview > 0 && (
-                          <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-900/30 px-2 py-1 rounded-full">
-                            <Clock className="w-3 h-3" />
-                            {material.conceptsDueForReview} due
-                          </span>
-                        )}
-
-                        {material.progressPercent === 100 && (
-                          <span className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
-                            <CheckCircle className="w-4 h-4" />
-                          </span>
-                        )}
-
-                        {material.status === "completed" && (
-                          <ChevronRight className="w-5 h-5 text-muted-foreground" />
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          )}
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
           {/* Reviews Due */}
           {dashboardData && dashboardData.reviewsDue.length > 0 && (
@@ -419,9 +544,7 @@ export function Dashboard() {
                   <Clock className="w-5 h-5 text-amber-500" />
                   Reviews Due
                 </CardTitle>
-                <CardDescription>
-                  Concepts ready for spaced repetition review
-                </CardDescription>
+                <CardDescription>Concepts ready for review</CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
@@ -439,7 +562,10 @@ export function Dashboard() {
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">
-                          Due {formatDistanceToNow(new Date(review.dueAt), { addSuffix: true })}
+                          Due{" "}
+                          {formatDistanceToNow(new Date(review.dueAt), {
+                            addSuffix: true,
+                          })}
                         </span>
                         <ChevronRight className="w-4 h-4 text-muted-foreground" />
                       </div>
